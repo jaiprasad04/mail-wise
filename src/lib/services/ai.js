@@ -3,17 +3,20 @@ import { UserService } from "./user";
 import config, { EMAIL_TEMPLATES, EMAIL_TONES, LANGUAGES, LENGTHS } from "../config";
 
 export const AIService = {
-  async generateEmail(userId, { prompt, recipient, toneId, lengthId, languageId, includeCta, suggestSubjects }) {
-    const cost = config.ai.model.creditCost; // 4 credits
+  async generateEmail(userId, { prompt, recipient, toneId, lengthId, languageId, includeCta, suggestSubjects, customApiKey = null }) {
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
+    const cost = isUsingCustomKey ? 0 : config.ai.model.creditCost; // 4 credits or 0
 
-    // 1. Deduct credits first
-    await UserService.deductCredits(userId, cost);
+    // 1. Deduct credits first if not using custom API key
+    if (!isUsingCustomKey && cost > 0) {
+      await UserService.deductCredits(userId, cost);
+    }
 
     const tone = EMAIL_TONES.find(t => t.id === toneId) || EMAIL_TONES[0];
     const langName = LANGUAGES.find(l => l.id === languageId)?.name || "English";
     const lengthDetails = LENGTHS.find(len => len.id === lengthId) || LENGTHS[1];
 
-    const apiKey = config.ai.apiKey;
+    const apiKey = isUsingCustomKey ? customApiKey.trim() : config.ai.apiKey;
     if (!apiKey || apiKey.includes("your_") || apiKey.trim() === "") {
       console.warn("MU_API_KEY is not configured or invalid. Falling back to local Mock Email Generation.");
       // Create mock creation directly
@@ -130,7 +133,7 @@ Suggest Subjects: ${suggestSubjects ? "YES" : "NO"}`;
     }
   },
 
-  async checkStatus(requestId) {
+  async checkStatus(requestId, customApiKey = null) {
     const creation = await prisma.emailCreation.findUnique({
       where: { requestId }
     });
@@ -234,7 +237,7 @@ Suggest Subjects: ${suggestSubjects ? "YES" : "NO"}`;
       return { status: "completed", creation: updated };
     }
 
-    const apiKey = config.ai.apiKey;
+    const apiKey = (customApiKey && customApiKey.trim().length > 0) ? customApiKey.trim() : config.ai.apiKey;
     if (!apiKey) throw new Error("MU_API_KEY is not configured");
 
     try {
@@ -337,8 +340,10 @@ Suggest Subjects: ${suggestSubjects ? "YES" : "NO"}`;
           }
         });
 
-        // Refund exact credits
-        await UserService.addCredits(creation.userId, creation.creditCost);
+        // Refund exact credits if deducted
+        if (creation.creditCost > 0) {
+          await UserService.addCredits(creation.userId, creation.creditCost);
+        }
         return { status: "failed", error: errorMsg };
       }
     } catch (e) {

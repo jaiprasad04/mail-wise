@@ -14,8 +14,11 @@ export async function GET(req) {
     const { searchParams } = new URL(req.url);
     const requestId = searchParams.get("requestId");
 
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || session.user.customApiKey || null;
+
     if (requestId) {
-      const statusData = await AIService.checkStatus(requestId);
+      const statusData = await AIService.checkStatus(requestId, customApiKey);
       return NextResponse.json(statusData);
     }
 
@@ -29,7 +32,7 @@ export async function GET(req) {
       creations.map(async (c) => {
         if (c.status === "processing" && c.requestId) {
           try {
-            await AIService.checkStatus(c.requestId);
+            await AIService.checkStatus(c.requestId, customApiKey);
             return (
               (await prisma.emailCreation.findUnique({
                 where: { id: c.id },
@@ -56,7 +59,8 @@ export async function POST(req) {
     const session = await getServerSession(authOptions);
     if (!session?.user) return new NextResponse("Unauthorized", { status: 401 });
 
-    const { prompt, recipient, toneId, lengthId, languageId, includeCta, suggestSubjects } = await req.json();
+    const body = await req.json();
+    const { prompt, recipient, toneId, lengthId, languageId, includeCta, suggestSubjects } = body;
 
     if (!prompt || prompt.trim() === "") {
       return new NextResponse("Missing email prompt or topic", { status: 400 });
@@ -65,17 +69,24 @@ export async function POST(req) {
       return new NextResponse("Missing target recipient", { status: 400 });
     }
 
-    const cost = config.ai.model.creditCost; // 4 credits
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { credits: true },
-    });
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
 
-    if (!user || user.credits < cost) {
-      return new NextResponse(
-        `Insufficient credits. Required: ${cost}, balance: ${user?.credits ?? 0}`,
-        { status: 400 }
-      );
+    const cost = isUsingCustomKey ? 0 : config.ai.model.creditCost; // 4 credits or 0
+
+    if (!isUsingCustomKey) {
+      const user = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { credits: true },
+      });
+
+      if (!user || user.credits < cost) {
+        return new NextResponse(
+          `Insufficient credits. Required: ${cost}, balance: ${user?.credits ?? 0}`,
+          { status: 400 }
+        );
+      }
     }
 
     const creation = await AIService.generateEmail(session.user.id, {
@@ -86,6 +97,7 @@ export async function POST(req) {
       languageId: languageId || "english",
       includeCta: includeCta !== false,
       suggestSubjects: suggestSubjects !== false,
+      customApiKey,
     });
 
     return NextResponse.json(creation);
